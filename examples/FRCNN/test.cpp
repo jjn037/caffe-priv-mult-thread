@@ -49,11 +49,18 @@ condition_variable query_empty;
 mutex id_mtx;
 bool get_query_img = false;
 
-//debug
-int jj=0;
-
 Size input_geometry_ = cv::Size(224, 224);
 
+struct q_repository{
+    queue<Mat>q1_in;
+    queue<vector<vector<float>>>q1_out;
+    queue<Mat>q2_in;
+    queue<vector<vector<float>>>q2_out;
+    std::mutex mtx1;
+    std::mutex mtx2;
+    std::condition_variable q1_empty;
+    std::condition_variable q2_empty;
+} q;
 
 inline std::string INT(float x) { char A[100]; sprintf(A,"%.1f",x); return std::string(A);};
 inline std::string FloatToString(float x) { char A[100]; sprintf(A,"%.4f",x); return std::string(A);};
@@ -67,10 +74,10 @@ void identifier_task0(int gpu_id){
     while(1){
         identifier.predict(query_img, query_feature);
         query_empty.notify_all();
-//        cout << "id_task0" << endl;
-//        if(get_query_img){
-//        break;
-//        }
+        cout << "id_task0" << endl;
+        if(get_query_img){
+        break;
+        }
     }
 }
 
@@ -81,7 +88,6 @@ void identifier_task1(int gpu_id){
     vector<float> target;
     Mat cv_image;
     bool tracker_init = true;
-
     while(1){
         cout << "id_task1" << endl;
         if(0==(i%2)){                             //q1_out q2_out 为空
@@ -119,26 +125,13 @@ void identifier_task1(int gpu_id){
         cout << "consumer" << endl;
         float obj=0;
         int obj_index=-1;
-
-        stringstream str_j;
-        str_j<<jj;
-        jj++;
-        Scalar color = CV_RGB(0,255,255);
         for(int i=0; i<sims.size(); i++){
-            Point pt(targets[i][0],targets[i][1]-5);
-            ostringstream newstr;
-            newstr<<sims[i];
-
-            rectangle(cv_image, Point(targets[i][0], targets[i][1]), Point(targets[i][2], targets[i][3]),
-                      cvScalar(0, 255, 0), 2, 8);
-            putText(cv_image, newstr.str(), pt, CV_FONT_HERSHEY_DUPLEX, 1.0f, color,2);
             cout<< sims[i]<< endl;
             if ((sims[i]>sim_thresh)&&(sims[i]>obj)){
                 obj = sims[i];
                 obj_index = i;
             }
         }
-        imwrite( "/home/priv-lab1/workspace/faster_exp/team2/faster-2fc/t" + str_j.str() + ".jpg", cv_image );
         if(obj_index>0 && tracker_init){
             int x = int(targets[obj_index][0]);
             int y = int(targets[obj_index][1]);
@@ -147,7 +140,7 @@ void identifier_task1(int gpu_id){
             obj_A = cvRect(x, y, width, height);
             trackerA_frames = all_in;                                      //tracker frames  error
             tracker_init = false;
-            trackerA_frames_empty.notify_all();                           //query feature 更新  得到query_img后 设置get_query_img开始更新query_feature
+            trackerA_frames_empty.notify_all();                             //query feature 更新  得到query_img后 设置get_query_img开始更新query_feature
         }
         all_in.pop();
    }
@@ -233,47 +226,36 @@ void detector_task2(int gpu_id, queue<Mat> &q_in, queue<vector<vector<float>>> &
          }
          else q2_in_empty.wait(lock);
     }
+
 }
 
 void img_assign(queue<Mat> &_q1_in, queue<Mat> &_q2_in, queue<Mat> &_all_in){
     VideoCapture capture;
-    Mat _frame;
+    Mat frame;
+    Mat temp;
     capture.open("/home/priv-lab1/workspace/faster_exp/team2/faster-2fc/1.mp4");
-//    sleep(5);
     int i=0;
-  while (1)
-  {   Mat frame;
-      capture >> frame;
-      _frame = frame;
-      if(0==(i%2)) {
-          _q1_in.push(frame);
-      }
-      else {
-          _q2_in.push(frame);}
-      // frame.copyTo(_frame);
-      all_in.push(_frame);
-      if(!(q1_in.empty())){
+    while (1){
+        capture >> temp;
+        frame = temp;
+//        if(frame.cols==0) break;
+        if(0==(i%2)) {
+            _q1_in.push(frame);
+            _all_in.push(frame);}
+        else {
+            _q2_in.push(frame);
+            _all_in.push(frame);}
+        if(!(q1_in.empty())){
             q1_in_empty.notify_all();
-      }
-      if(!(q2_in.empty())){
-          q2_in_empty.notify_all();
-      }
-      cout << frame.cols << endl;
-      cout << frame.rows << endl;
-      i++;
-      if(i==50) break;
-  }
-//  int j=0;
-//  while(!(all_in.empty())){
-//    j++;
-//    Mat f;
-//    f = all_in.front();
-//    all_in.pop();
-//    stringstream newstr;
-//    newstr<<j;
-//    imwrite( "//home/priv-lab1/workspace/faster_exp/team2/faster-2fc/t" + newstr.str() + ".jpg", f );
-//    cout<<  "/home/priv-lab1/workspace/faster_exp/team2/faster-2fc/t" + newstr.str() + ".jpg" << endl;
-//  }
+        }
+        if(!(q2_in.empty())){
+            q2_in_empty.notify_all();
+        }
+        i++;
+        if(i==10) break;
+        cout << _q1_in.size() << "q1" << endl;
+        cout << _q2_in.size() << "q2" << endl;
+     }
 }
 
 // tracker 初始化条件 锁条件 帧存储
@@ -286,18 +268,32 @@ void tracker_task(Rect &obj, queue<Mat> &frames){
     KCFTracker tracker(HOG, FIXEDWINDOW, MULTISCALE, LAB);
     Rect result;
     Mat frame;
+    int i=0;
+
     while(1){
         unique_lock<mutex> lock(tracker_mtx);
-        if(!(frames.empty())){
-            frame = frames.front();
+        if(obj_A.area()!=1 && !(all_in.empty())){
+        cout<<all_in.size()<<endl;
+            cout<<"tracker taskkkkkkkkkkkkkkkkkkkkkkkkkkk"<<endl;
+            frame = all_in.front();
             frames.pop();
             if(init_tracker){
                 tracker.init(obj, frame);
+                rectangle(frame, Point(obj.x, obj.y), Point(obj.x + obj.width, obj.y + obj.height),
+                      cvScalar(0, 255, 0), 2, 8);
                 init_tracker=false;
             }
             else {
                 result = tracker.update(frame);
+                BoundRect_save.insert(BoundRect_save.end(), result);
+                rectangle(frame, Point(result.x, result.y), Point(result.x + result.width, result.y + result.height), Scalar(0, 255, 0), 2, 8);
             }
+            stringstream newstr;
+            newstr<<i;
+            i++;
+//            imshow("Image", frame);
+            cout<<"/home/priv-lab1/workspace/faster_exp/team2/faster-2fc/tt" + newstr.str() + ".jpg"<<endl;
+            imwrite( "/home/priv-lab1/workspace/faster_exp/team2/faster-2fc/tt" + newstr.str() + ".jpg", frame);
         }
         else trackerA_frames_empty.wait(lock);
     }
@@ -310,7 +306,7 @@ int main()
     thread detector1(detector_task1, 1, ref(q1_in), ref(q1_out));
     thread detector2(detector_task2, 2, ref(q2_in), ref(q2_out));
     thread identifier1(identifier_task1, 0);
-//    thread trackerA(tracker_task, ref(obj_A), ref(trackerA_frames));
+    thread trackerA(tracker_task, ref(obj_A), ref(trackerA_frames));
 //    thread trackerB(tracker_task);
     thread assign(img_assign, ref(q1_in), ref(q2_in), ref(all_in));
 
@@ -319,7 +315,7 @@ int main()
     detector1.join();
     detector2.join();
     identifier1.join();
-//    trackerA.join();
+    trackerA.join();
     assign.join();
     query_id.join();
 }
